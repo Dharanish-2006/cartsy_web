@@ -99,7 +99,6 @@ export default function Checkout() {
 
   return (
     <div className="page">
-      <script src="https://checkout.razorpay.com/v1/checkout.js" />
       <div className="container">
         <motion.h1
           className={styles.title}
