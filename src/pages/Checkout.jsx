@@ -1,10 +1,12 @@
 import { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
-import { MapPin, CreditCard, Truck, CheckCircle2, Package } from 'lucide-react'
+import { MapPin, CreditCard, Truck, CheckCircle2, Package, LogIn } from 'lucide-react'
 import toast from 'react-hot-toast'
-import { api, getImageUrl } from '../utils/api'
+import { cartService, orderService } from '../services'
+import { getImageUrl } from '../utils/api'
 import { useCart } from '../context/CartContext'
+import { useAuth } from '../context/AuthContext'
 import styles from './Checkout.module.css'
 
 export default function Checkout() {
@@ -15,79 +17,102 @@ export default function Checkout() {
   const [placing, setPlacing] = useState(false)
   const navigate = useNavigate()
   const { setCartCount } = useCart()
+  const { isAuthenticated } = useAuth()
 
   const [form, setForm] = useState({
     full_name: '', address: '', city: '', postal_code: '', country: ''
   })
 
   useEffect(() => {
-    api.get('/api/cart/').then(res => {
-      setItems(res.data.items || [])
-      setTotal(res.data.total || 0)
-    }).catch(() => toast.error('Failed to load cart')).finally(() => setLoading(false))
+    cartService.get()
+      .then(data => {
+        setItems(data.items || [])
+        setTotal(data.total || 0)
+      })
+      .catch(() => toast.error('Failed to load cart'))
+      .finally(() => setLoading(false))
   }, [])
 
   const handleChange = e => setForm(f => ({ ...f, [e.target.name]: e.target.value }))
 
-  const placeOrder = async () => {
+  const validateForm = () => {
     for (const key of Object.keys(form)) {
       if (!form[key].trim()) {
-        toast.error(`Please fill in ${key.replace('_', ' ')}`)
-        return
+        toast.error(`Please fill in ${key.replace(/_/g, ' ')}`)
+        return false
       }
+    }
+    return true
+  }
+
+  const placeOrder = async () => {
+    if (!isAuthenticated) {
+      toast.error('Please log in to place your order')
+      navigate('/login')
+      return
+    }
+    if (!validateForm()) return
+    if (items.length === 0) {
+      toast.error('Your cart is empty')
+      return
     }
 
     setPlacing(true)
 
     if (paymentMethod === 'cod') {
       try {
-        const res = await api.post('/api/orders/create/', { ...form, payment_method: 'COD' })
-        if (res.data.order_id) {
+        const res = await orderService.createCOD(form)
+        if (res.order_id) {
           setCartCount(0)
           toast.success('Order placed successfully!')
           navigate('/orders')
         }
-      } catch {
-        toast.error('Failed to place order')
+      } catch (err) {
+        toast.error(err?.response?.data?.error || 'Failed to place order')
       } finally {
         setPlacing(false)
       }
-    } else {
-      // Razorpay
-      try {
-        const res = await api.post('/api/orders/razorpay/', { ...form })
-        const { key, order_id, amount } = res.data
+      return
+    }
 
-        const options = {
-          key,
-          amount,
-          currency: 'INR',
-          name: 'Cartsy',
-          order_id,
-          handler: async function (response) {
-            try {
-              await api.post('/orders/razorpay/verify/', {
-                razorpay_order_id: response.razorpay_order_id,
-                razorpay_payment_id: response.razorpay_payment_id,
-                razorpay_signature: response.razorpay_signature,
-              })
-              setCartCount(0)
-              toast.success('Payment successful!')
-              navigate('/orders')
-            } catch {
-              toast.error('Payment verification failed')
-            }
-          },
-          theme: { color: '#7c6aff' },
-        }
+    // ── Razorpay flow ──────────────────────────────────────────────
+    try {
+      const { key, order_id, amount } = await orderService.createRazorpay(form)
 
-        const rzp = new window.Razorpay(options)
-        rzp.open()
-      } catch {
-        toast.error('Failed to initiate payment')
-      } finally {
-        setPlacing(false)
+      const options = {
+        key,
+        amount,
+        currency: 'INR',
+        name: 'Cartsy',
+        order_id,
+        handler: async (response) => {
+          try {
+            await orderService.verifyRazorpay({
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+            })
+            setCartCount(0)
+            toast.success('Payment successful!')
+            navigate('/orders')
+          } catch {
+            toast.error('Payment verification failed. Please contact support.')
+          }
+        },
+        modal: {
+          ondismiss: () => {
+            setPlacing(false)
+            toast('Payment cancelled', { icon: 'ℹ️' })
+          }
+        },
+        theme: { color: '#7c6aff' },
       }
+
+      const rzp = new window.Razorpay(options)
+      rzp.open()
+    } catch (err) {
+      toast.error(err?.response?.data?.error || 'Failed to initiate payment')
+      setPlacing(false)
     }
   }
 
@@ -108,8 +133,30 @@ export default function Checkout() {
           Checkout
         </motion.h1>
 
+        {!isAuthenticated && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+              padding: '14px 18px',
+              background: 'rgba(124,106,255,0.08)',
+              border: '1px solid rgba(124,106,255,0.25)',
+              borderRadius: '12px',
+              marginBottom: '24px',
+              fontSize: '14px',
+              color: 'var(--text-muted)',
+            }}
+          >
+            <LogIn size={16} color="var(--accent)" />
+            <span>You'll need to <Link to="/login" style={{ color: 'var(--accent)', fontWeight: 600 }}>log in</Link> before placing your order.</span>
+          </motion.div>
+        )}
+
         <div className={styles.layout}>
-          {/* Left: Form */}
+          {/* Left: Shipping + Payment */}
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -125,23 +172,29 @@ export default function Checkout() {
               <div className={styles.formGrid}>
                 <div className={`${styles.field} ${styles.fullWidth}`}>
                   <label className="label">Full Name</label>
-                  <input name="full_name" className="input" placeholder="John Doe" value={form.full_name} onChange={handleChange} />
+                  <input name="full_name" className="input" placeholder="John Doe"
+                    value={form.full_name} onChange={handleChange} />
                 </div>
                 <div className={`${styles.field} ${styles.fullWidth}`}>
                   <label className="label">Address</label>
-                  <textarea name="address" className={`input ${styles.textarea}`} placeholder="Street address" value={form.address} onChange={handleChange} />
+                  <textarea name="address" className={`input ${styles.textarea}`}
+                    placeholder="Street address, apartment, etc."
+                    value={form.address} onChange={handleChange} />
                 </div>
                 <div className={styles.field}>
                   <label className="label">City</label>
-                  <input name="city" className="input" placeholder="Mumbai" value={form.city} onChange={handleChange} />
+                  <input name="city" className="input" placeholder="Mumbai"
+                    value={form.city} onChange={handleChange} />
                 </div>
                 <div className={styles.field}>
                   <label className="label">Postal Code</label>
-                  <input name="postal_code" className="input" placeholder="400001" value={form.postal_code} onChange={handleChange} />
+                  <input name="postal_code" className="input" placeholder="400001"
+                    value={form.postal_code} onChange={handleChange} />
                 </div>
                 <div className={`${styles.field} ${styles.fullWidth}`}>
                   <label className="label">Country</label>
-                  <input name="country" className="input" placeholder="India" value={form.country} onChange={handleChange} />
+                  <input name="country" className="input" placeholder="India"
+                    value={form.country} onChange={handleChange} />
                 </div>
               </div>
             </div>
@@ -175,7 +228,7 @@ export default function Checkout() {
             </div>
           </motion.div>
 
-          {/* Right: Summary */}
+          {/* Right: Order summary */}
           <motion.div
             className={styles.summary}
             initial={{ opacity: 0, y: 20 }}
@@ -188,12 +241,14 @@ export default function Checkout() {
             </h2>
 
             <div className={styles.orderItems}>
-              {items.map(item => (
+              {items.length === 0 ? (
+                <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>Your cart is empty</p>
+              ) : items.map(item => (
                 <div key={item.id} className={styles.orderItem}>
                   <div className={styles.orderItemImg}>
-                    {item.product?.image ? (
-                      <img src={getImageUrl(item.product.image)} alt={item.product.product_name} />
-                    ) : <Package size={16} />}
+                    {item.product?.image
+                      ? <img src={getImageUrl(item.product.image)} alt={item.product.product_name} />
+                      : <Package size={16} />}
                   </div>
                   <div className={styles.orderItemInfo}>
                     <span className={styles.orderItemName}>{item.product?.product_name}</span>
@@ -218,11 +273,18 @@ export default function Checkout() {
               whileTap={{ scale: 0.97 }}
             >
               {placing ? (
-                <span style={{ width: 20, height: 20, borderRadius: '50%', border: '2px solid rgba(255,255,255,0.3)', borderTopColor: 'white', display: 'inline-block', animation: 'spin 0.7s linear infinite' }} />
+                <span style={{
+                  width: 20, height: 20, borderRadius: '50%',
+                  border: '2px solid rgba(255,255,255,0.3)',
+                  borderTopColor: 'white', display: 'inline-block',
+                  animation: 'spin 0.7s linear infinite'
+                }} />
               ) : (
                 <>
                   <CheckCircle2 size={18} />
-                  {paymentMethod === 'cod' ? 'Place Order' : 'Pay Now'}
+                  {!isAuthenticated
+                    ? 'Log in to Order'
+                    : paymentMethod === 'cod' ? 'Place Order' : 'Pay Now'}
                 </>
               )}
             </motion.button>

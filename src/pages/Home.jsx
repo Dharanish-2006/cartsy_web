@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { ArrowRight, Sparkles, ShieldCheck, Zap, Truck } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
-import { api } from '../utils/api'
+import { productService, cartService } from '../services'
 import ProductCard from '../components/ProductCard'
 import { useCart } from '../context/CartContext'
+import { useAuth } from '../context/AuthContext'
 import styles from './Home.module.css'
 
 const FEATURES = [
@@ -19,18 +20,24 @@ export default function Home() {
   const [products, setProducts] = useState([])
   const [loading, setLoading] = useState(true)
   const { increment } = useCart()
+  const { isAuthenticated } = useAuth()
+  const navigate = useNavigate()
 
   useEffect(() => {
-    api.get('/api/home/').then(res => {
-      setProducts(res.data || [])
-    }).catch(() => {
-      toast.error('Failed to load products')
-    }).finally(() => setLoading(false))
+    productService.list()
+      .then(setProducts)
+      .catch(() => toast.error('Failed to load products'))
+      .finally(() => setLoading(false))
   }, [])
 
   const handleAddToCart = async (product) => {
+    if (!isAuthenticated) {
+      toast('Log in to add items to your cart', { icon: '🔒' })
+      navigate('/login')
+      return
+    }
     try {
-      await api.post('/api/cart/', { product_id: product.id, quantity: 1 })
+      await cartService.add(product.id, 1)
       increment()
       toast.success(`${product.product_name} added to cart!`)
     } catch {
@@ -61,13 +68,15 @@ export default function Home() {
               From electronics to lifestyle — Cartsy has it all.
             </p>
             <div className={styles.heroCta}>
-              <Link to="#products" className="btn btn-primary btn-lg">
+              <a href="#products" className="btn btn-primary btn-lg">
                 Explore Products
                 <ArrowRight size={18} />
-              </Link>
-              <Link to="/orders" className="btn btn-outline btn-lg">
-                My Orders
-              </Link>
+              </a>
+              {isAuthenticated ? (
+                <Link to="/orders" className="btn btn-outline btn-lg">My Orders</Link>
+              ) : (
+                <Link to="/login" className="btn btn-outline btn-lg">Sign In</Link>
+              )}
             </div>
           </motion.div>
 

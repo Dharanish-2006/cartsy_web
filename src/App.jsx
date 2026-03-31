@@ -53,19 +53,13 @@ export default function App() {
             <Route path="/verify-otp" element={<VerifyOTP />} />
 
             <Route path="/" element={
-              <ProtectedRoute>
-                <Layout><Home /></Layout>
-              </ProtectedRoute>
+              <Layout><Home /></Layout>
             } />
             <Route path="/product/:id" element={
-              <ProtectedRoute>
-                <Layout><ProductDetail /></Layout>
-              </ProtectedRoute>
+              <Layout><ProductDetail /></Layout>
             } />
             <Route path="/cart" element={
-              <ProtectedRoute>
-                <Layout><Cart /></Layout>
-              </ProtectedRoute>
+              <Layout><Cart /></Layout>
             } />
             <Route path="/checkout" element={
               <ProtectedRoute>

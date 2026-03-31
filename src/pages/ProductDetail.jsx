@@ -3,8 +3,10 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { ShoppingCart, ArrowLeft, Star, Package, Shield, ChevronLeft, ChevronRight } from 'lucide-react'
 import toast from 'react-hot-toast'
-import { api, getImageUrl } from '../utils/api'
+import { productService, cartService } from '../services'
+import { getImageUrl } from '../utils/api'
 import { useCart } from '../context/CartContext'
+import { useAuth } from '../context/AuthContext'
 import styles from './ProductDetail.module.css'
 
 export default function ProductDetail() {
@@ -15,21 +17,30 @@ export default function ProductDetail() {
   const [activeImg, setActiveImg] = useState(0)
   const [qty, setQty] = useState(1)
   const { increment } = useCart()
+  const { isAuthenticated } = useAuth()
 
   useEffect(() => {
-    api.get(`/api/products/${id}/`).then(res => {
-      setProduct(res.data)
-    }).catch(() => {
-      toast.error('Product not found')
-      navigate('/')
-    }).finally(() => setLoading(false))
+    productService.get(id)
+      .then(setProduct)
+      .catch(() => {
+        toast.error('Product not found')
+        navigate('/')
+      })
+      .finally(() => setLoading(false))
   }, [id])
 
-  const allImages = product ? [product.image, ...(product.images?.map(i => i.image) || [])].filter(Boolean) : []
+  const allImages = product
+    ? [product.image, ...(product.images?.map(i => i.image) || [])].filter(Boolean)
+    : []
 
   const handleAddToCart = async () => {
+    if (!isAuthenticated) {
+      toast('Log in to add items to your cart', { icon: '🔒' })
+      navigate('/login')
+      return
+    }
     try {
-      await api.post('/api/cart/', { product_id: product.id, quantity: qty })
+      await cartService.add(product.id, qty)
       for (let i = 0; i < qty; i++) increment()
       toast.success('Added to cart!')
     } catch {
@@ -37,13 +48,11 @@ export default function ProductDetail() {
     }
   }
 
-  if (loading) {
-    return (
-      <div className="page" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <div className="spinner" />
-      </div>
-    )
-  }
+  if (loading) return (
+    <div className="page" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div className="spinner" />
+    </div>
+  )
 
   if (!product) return null
 
@@ -77,10 +86,12 @@ export default function ProductDetail() {
               )}
               {allImages.length > 1 && (
                 <>
-                  <button className={`${styles.navBtn} ${styles.navPrev}`} onClick={() => setActiveImg(i => (i - 1 + allImages.length) % allImages.length)}>
+                  <button className={`${styles.navBtn} ${styles.navPrev}`}
+                    onClick={() => setActiveImg(i => (i - 1 + allImages.length) % allImages.length)}>
                     <ChevronLeft size={20} />
                   </button>
-                  <button className={`${styles.navBtn} ${styles.navNext}`} onClick={() => setActiveImg(i => (i + 1) % allImages.length)}>
+                  <button className={`${styles.navBtn} ${styles.navNext}`}
+                    onClick={() => setActiveImg(i => (i + 1) % allImages.length)}>
                     <ChevronRight size={20} />
                   </button>
                 </>
@@ -90,11 +101,9 @@ export default function ProductDetail() {
             {allImages.length > 1 && (
               <div className={styles.thumbs}>
                 {allImages.map((img, i) => (
-                  <button
-                    key={i}
+                  <button key={i}
                     className={`${styles.thumb} ${activeImg === i ? styles.thumbActive : ''}`}
-                    onClick={() => setActiveImg(i)}
-                  >
+                    onClick={() => setActiveImg(i)}>
                     <img src={getImageUrl(img)} alt="" />
                   </button>
                 ))}
@@ -144,7 +153,7 @@ export default function ProductDetail() {
               whileTap={{ scale: 0.97 }}
             >
               <ShoppingCart size={18} />
-              Add to Cart
+              {isAuthenticated ? 'Add to Cart' : 'Log in to Add'}
             </motion.button>
 
             <div className={styles.guarantees}>

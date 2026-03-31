@@ -1,10 +1,12 @@
 import { useState, useEffect } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ShoppingCart, Trash2, Plus, Minus, ArrowRight, ShoppingBag } from 'lucide-react'
 import toast from 'react-hot-toast'
-import { api, getImageUrl } from '../utils/api'
+import { cartService } from '../services'
+import { getImageUrl } from '../utils/api'
 import { useCart } from '../context/CartContext'
+import { useAuth } from '../context/AuthContext'
 import styles from './Cart.module.css'
 
 export default function Cart() {
@@ -12,13 +14,20 @@ export default function Cart() {
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const { setCartCount } = useCart()
+  const { isAuthenticated } = useAuth()
+  const navigate = useNavigate()
 
   const fetchCart = async () => {
+    if (!isAuthenticated) {
+      // Guest users see an empty cart with a prompt to log in
+      setLoading(false)
+      return
+    }
     try {
-      const res = await api.get('/api/cart/')
-      setItems(res.data.items || [])
-      setTotal(res.data.total || 0)
-      setCartCount(res.data.items?.length || 0)
+      const data = await cartService.get()
+      setItems(data.items || [])
+      setTotal(data.total || 0)
+      setCartCount(data.items?.length || 0)
     } catch {
       toast.error('Failed to load cart')
     } finally {
@@ -26,22 +35,21 @@ export default function Cart() {
     }
   }
 
-  useEffect(() => { fetchCart() }, [])
+  useEffect(() => { fetchCart() }, [isAuthenticated])
 
   const updateQty = async (itemId, action) => {
     try {
-      await api.post('/api/cart/update/', { item_id: itemId, action })
+      await cartService.update(itemId, action)
       fetchCart()
     } catch {
-      toast.error('Failed to update')
+      toast.error('Failed to update quantity')
     }
   }
 
   const removeItem = async (itemId) => {
     try {
-      await api.post('/api/cart/update/', { item_id: itemId, action: 'decrease' })
-      // Keep decreasing until removed – simpler: just refresh
-      // Actually we'll call decrease until 0, but backend handles this
+      // Decrease until gone — backend deletes at qty 0
+      await cartService.update(itemId, 'decrease')
       fetchCart()
       toast.success('Item removed')
     } catch {
@@ -49,9 +57,44 @@ export default function Cart() {
     }
   }
 
+  const handleCheckout = () => {
+    if (!isAuthenticated) {
+      toast.error('Please log in to checkout')
+      navigate('/login')
+      return
+    }
+    navigate('/checkout')
+  }
+
   if (loading) return (
     <div className="page" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div className="spinner" />
+    </div>
+  )
+
+  // Guest empty state
+  if (!isAuthenticated) return (
+    <div className="page">
+      <div className="container">
+        <div className={styles.pageHeader}>
+          <h1 className={styles.pageTitle}>Your Cart</h1>
+        </div>
+        <div className="empty-state">
+          <div className="empty-state-icon" style={{ borderRadius: '50%' }}>
+            <ShoppingCart size={36} />
+          </div>
+          <h3 style={{ fontSize: '20px', fontFamily: 'var(--font-display)', marginBottom: '8px' }}>
+            Sign in to see your cart
+          </h3>
+          <p style={{ color: 'var(--text-muted)', marginBottom: '24px' }}>
+            Log in to add items and checkout
+          </p>
+          <div style={{ display: 'flex', gap: '12px' }}>
+            <Link to="/login" className="btn btn-primary">Log in</Link>
+            <Link to="/" className="btn btn-ghost">Continue shopping</Link>
+          </div>
+        </div>
+      </div>
     </div>
   )
 
@@ -165,10 +208,10 @@ export default function Cart() {
                   <span className={styles.totalAmount}>₹{Number(total).toLocaleString('en-IN')}</span>
                 </div>
 
-                <Link to="/checkout" className={`btn btn-primary ${styles.checkoutBtn}`}>
+                <button onClick={handleCheckout} className={`btn btn-primary ${styles.checkoutBtn}`}>
                   Proceed to Checkout
                   <ArrowRight size={16} />
-                </Link>
+                </button>
 
                 <Link to="/" className={`btn btn-ghost ${styles.continueBtn}`}>
                   Continue Shopping
