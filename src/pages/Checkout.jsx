@@ -1,22 +1,32 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { motion } from 'framer-motion'
-import { MapPin, CreditCard, Truck, CheckCircle2, Package, LogIn } from 'lucide-react'
+import { motion, AnimatePresence } from 'framer-motion'
+import {
+  MapPin, CreditCard, Truck, CheckCircle2, Package,
+  LogIn, Map, PenLine, ChevronDown, ChevronUp,
+} from 'lucide-react'
 import toast from 'react-hot-toast'
 import { cartService, orderService } from '../services'
 import { getImageUrl } from '../utils/api'
 import { useCart } from '../context/CartContext'
 import { useAuth } from '../context/AuthContext'
+import LocationPicker from './Locationpicker'
 import styles from './Checkout.module.css'
 
+const MODE_MAP    = 'map'
+const MODE_MANUAL = 'manual'
+
 export default function Checkout() {
-  const [items, setItems] = useState([])
-  const [total, setTotal] = useState(0)
+  const [items,         setItems]         = useState([])
+  const [total,         setTotal]         = useState(0)
   const [paymentMethod, setPaymentMethod] = useState('cod')
-  const [loading, setLoading] = useState(true)
-  const [placing, setPlacing] = useState(false)
-  const navigate = useNavigate()
-  const { setCartCount } = useCart()
+  const [loading,       setLoading]       = useState(true)
+  const [placing,       setPlacing]       = useState(false)
+  const [addressMode,   setAddressMode]   = useState(MODE_MAP)
+  const [fieldsOpen,    setFieldsOpen]    = useState(true)
+
+  const navigate            = useNavigate()
+  const { setCartCount }    = useCart()
   const { isAuthenticated } = useAuth()
 
   const [form, setForm] = useState({
@@ -25,91 +35,68 @@ export default function Checkout() {
 
   useEffect(() => {
     cartService.get()
-      .then(data => {
-        setItems(data.items || [])
-        setTotal(data.total || 0)
-      })
+      .then(data => { setItems(data.items || []); setTotal(data.total || 0) })
       .catch(() => toast.error('Failed to load cart'))
       .finally(() => setLoading(false))
   }, [])
 
   const handleChange = e => setForm(f => ({ ...f, [e.target.name]: e.target.value }))
 
+  const handleAddressResolved = useCallback((resolved) => {
+    setForm(prev => ({
+      ...prev,
+      address:     resolved.address     || prev.address,
+      city:        resolved.city        || prev.city,
+      postal_code: resolved.postal_code || prev.postal_code,
+      country:     resolved.country     || prev.country,
+    }))
+    toast.success('Address auto-filled from map!', { icon: '📍' })
+  }, [])
+
   const validateForm = () => {
-    for (const key of Object.keys(form)) {
-      if (!form[key].trim()) {
-        toast.error(`Please fill in ${key.replace(/_/g, ' ')}`)
-        return false
-      }
+    const checks = [
+      ['full_name',   'Full name'],
+      ['address',     'Street address'],
+      ['city',        'City'],
+      ['postal_code', 'Postal code'],
+      ['country',     'Country'],
+    ]
+    for (const [key, label] of checks) {
+      if (!form[key].trim()) { toast.error(`Please fill in ${label}`); return false }
     }
     return true
   }
 
   const placeOrder = async () => {
-    if (!isAuthenticated) {
-      toast.error('Please log in to place your order')
-      navigate('/login')
-      return
-    }
+    if (!isAuthenticated) { toast.error('Please log in first'); navigate('/login'); return }
     if (!validateForm()) return
-    if (items.length === 0) {
-      toast.error('Your cart is empty')
-      return
-    }
-
+    if (items.length === 0) { toast.error('Your cart is empty'); return }
     setPlacing(true)
 
     if (paymentMethod === 'cod') {
       try {
         const res = await orderService.createCOD(form)
-        if (res.order_id) {
-          setCartCount(0)
-          toast.success('Order placed successfully!')
-          navigate('/orders')
-        }
+        if (res.order_id) { setCartCount(0); toast.success('Order placed!'); navigate('/orders') }
       } catch (err) {
         toast.error(err?.response?.data?.error || 'Failed to place order')
-      } finally {
-        setPlacing(false)
-      }
+      } finally { setPlacing(false) }
       return
     }
 
-    // ── Razorpay flow ──────────────────────────────────────────────
     try {
       const { key, order_id, amount } = await orderService.createRazorpay(form)
-
       const options = {
-        key,
-        amount,
-        currency: 'INR',
-        name: 'Cartsy',
-        order_id,
+        key, amount, currency: 'INR', name: 'Cartsy', order_id,
         handler: async (response) => {
           try {
-            await orderService.verifyRazorpay({
-              razorpay_order_id: response.razorpay_order_id,
-              razorpay_payment_id: response.razorpay_payment_id,
-              razorpay_signature: response.razorpay_signature,
-            })
-            setCartCount(0)
-            toast.success('Payment successful!')
-            navigate('/orders')
-          } catch {
-            toast.error('Payment verification failed. Please contact support.')
-          }
+            await orderService.verifyRazorpay(response)
+            setCartCount(0); toast.success('Payment successful!'); navigate('/orders')
+          } catch { toast.error('Payment verification failed') }
         },
-        modal: {
-          ondismiss: () => {
-            setPlacing(false)
-            toast('Payment cancelled', { icon: 'ℹ️' })
-          }
-        },
+        modal: { ondismiss: () => { setPlacing(false); toast('Payment cancelled', { icon: 'ℹ️' }) } },
         theme: { color: '#7c6aff' },
       }
-
-      const rzp = new window.Razorpay(options)
-      rzp.open()
+      new window.Razorpay(options).open()
     } catch (err) {
       toast.error(err?.response?.data?.error || 'Failed to initiate payment')
       setPlacing(false)
@@ -117,7 +104,7 @@ export default function Checkout() {
   }
 
   if (loading) return (
-    <div className="page" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+    <div className="page" style={{ display:'flex', alignItems:'center', justifyContent:'center' }}>
       <div className="spinner" />
     </div>
   )
@@ -125,94 +112,102 @@ export default function Checkout() {
   return (
     <div className="page">
       <div className="container">
-        <motion.h1
-          className={styles.title}
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-        >
+        <motion.h1 className={styles.title} initial={{ opacity:0, y:16 }} animate={{ opacity:1, y:0 }}>
           Checkout
         </motion.h1>
 
         {!isAuthenticated && (
-          <motion.div
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '12px',
-              padding: '14px 18px',
-              background: 'rgba(124,106,255,0.08)',
-              border: '1px solid rgba(124,106,255,0.25)',
-              borderRadius: '12px',
-              marginBottom: '24px',
-              fontSize: '14px',
-              color: 'var(--text-muted)',
-            }}
-          >
-            <LogIn size={16} color="var(--accent)" />
-            <span>You'll need to <Link to="/login" style={{ color: 'var(--accent)', fontWeight: 600 }}>log in</Link> before placing your order.</span>
-          </motion.div>
+          <div className={styles.guestBanner}>
+            <LogIn size={14} />
+            <span>
+              <Link to="/login" style={{ color:'var(--accent-3)', fontWeight:700 }}>Log in</Link>
+              {' '}to place your order
+            </span>
+          </div>
         )}
 
         <div className={styles.layout}>
-          {/* Left: Shipping + Payment */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.1 }}
-          >
-            {/* Shipping */}
+          {/* ── Left ── */}
+          <motion.div initial={{ opacity:0, y:20 }} animate={{ opacity:1, y:0 }} transition={{ delay:0.1 }}>
+
+            {/* Address section */}
             <div className={styles.section}>
               <div className={styles.sectionHeader}>
-                <div className={styles.sectionIcon}><MapPin size={16} /></div>
-                <h2 className={styles.sectionTitle}>Shipping Details</h2>
+                <div className={styles.sectionIcon}><MapPin size={14} /></div>
+                <h2 className={styles.sectionTitle}>Delivery address</h2>
+                <div className={styles.modeToggle}>
+                  <button
+                    className={`${styles.modeBtn} ${addressMode === MODE_MAP ? styles.modeBtnActive : ''}`}
+                    onClick={() => setAddressMode(MODE_MAP)}
+                  ><Map size={12} /> Map</button>
+                  <button
+                    className={`${styles.modeBtn} ${addressMode === MODE_MANUAL ? styles.modeBtnActive : ''}`}
+                    onClick={() => setAddressMode(MODE_MANUAL)}
+                  ><PenLine size={12} /> Manual</button>
+                </div>
               </div>
 
-              <div className={styles.formGrid}>
-                <div className={`${styles.field} ${styles.fullWidth}`}>
-                  <label className="label">Full Name</label>
-                  <input name="full_name" className="input" placeholder="John Doe"
-                    value={form.full_name} onChange={handleChange} />
-                </div>
-                <div className={`${styles.field} ${styles.fullWidth}`}>
-                  <label className="label">Address</label>
-                  <textarea name="address" className={`input ${styles.textarea}`}
-                    placeholder="Street address, apartment, etc."
-                    value={form.address} onChange={handleChange} />
-                </div>
-                <div className={styles.field}>
-                  <label className="label">City</label>
-                  <input name="city" className="input" placeholder="Mumbai"
-                    value={form.city} onChange={handleChange} />
-                </div>
-                <div className={styles.field}>
-                  <label className="label">Postal Code</label>
-                  <input name="postal_code" className="input" placeholder="400001"
-                    value={form.postal_code} onChange={handleChange} />
-                </div>
-                <div className={`${styles.field} ${styles.fullWidth}`}>
-                  <label className="label">Country</label>
-                  <input name="country" className="input" placeholder="India"
-                    value={form.country} onChange={handleChange} />
-                </div>
+              {/* Full name — always visible */}
+              <div style={{ marginBottom:14 }}>
+                <label className="label">Full name</label>
+                <input name="full_name" className="input" placeholder="Arjun Sharma"
+                  value={form.full_name} onChange={handleChange} />
               </div>
+
+              <AnimatePresence mode="wait">
+                {addressMode === MODE_MAP ? (
+                  <motion.div key="map"
+                    initial={{ opacity:0, height:0 }} animate={{ opacity:1, height:'auto' }}
+                    exit={{ opacity:0, height:0 }} transition={{ duration:0.25 }}
+                    style={{ overflow:'hidden' }}
+                  >
+                    <LocationPicker
+                      onAddressResolved={handleAddressResolved}
+                      existingAddress={form.address}
+                    />
+
+                    {/* Toggle to show/edit the filled fields */}
+                    <button className={styles.overrideToggle} onClick={() => setFieldsOpen(o => !o)}>
+                      {fieldsOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                      {fieldsOpen ? 'Hide' : 'Edit'} address fields
+                    </button>
+
+                    <AnimatePresence>
+                      {fieldsOpen && (
+                        <motion.div key="fields"
+                          initial={{ opacity:0, height:0 }} animate={{ opacity:1, height:'auto' }}
+                          exit={{ opacity:0, height:0 }} transition={{ duration:0.2 }}
+                          style={{ overflow:'hidden' }}
+                        >
+                          <AddressFields form={form} handleChange={handleChange} />
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </motion.div>
+                ) : (
+                  <motion.div key="manual"
+                    initial={{ opacity:0, height:0 }} animate={{ opacity:1, height:'auto' }}
+                    exit={{ opacity:0, height:0 }} transition={{ duration:0.25 }}
+                    style={{ overflow:'hidden' }}
+                  >
+                    <AddressFields form={form} handleChange={handleChange} />
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
 
-            {/* Payment */}
+            {/* Payment section */}
             <div className={styles.section}>
               <div className={styles.sectionHeader}>
-                <div className={styles.sectionIcon}><CreditCard size={16} /></div>
-                <h2 className={styles.sectionTitle}>Payment Method</h2>
+                <div className={styles.sectionIcon}><CreditCard size={14} /></div>
+                <h2 className={styles.sectionTitle}>Payment method</h2>
               </div>
-
               <div className={styles.paymentOptions}>
                 {[
-                  { value: 'cod', label: 'Cash on Delivery', desc: 'Pay when your order arrives', icon: <Truck size={20} /> },
-                  { value: 'razorpay', label: 'Pay Online', desc: 'UPI, Cards, Netbanking via Razorpay', icon: <CreditCard size={20} /> },
+                  { value:'cod',      label:'Cash on delivery', desc:'Pay when your order arrives', icon:<Truck size={18} /> },
+                  { value:'razorpay', label:'Pay online',        desc:'UPI, cards, netbanking',      icon:<CreditCard size={18} /> },
                 ].map(opt => (
-                  <button
-                    key={opt.value}
+                  <button key={opt.value}
                     className={`${styles.paymentOption} ${paymentMethod === opt.value ? styles.selected : ''}`}
                     onClick={() => setPaymentMethod(opt.value)}
                   >
@@ -228,37 +223,31 @@ export default function Checkout() {
             </div>
           </motion.div>
 
-          {/* Right: Order summary */}
-          <motion.div
-            className={styles.summary}
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.2 }}
-          >
-            <h2 className={styles.summaryTitle}>
-              <Package size={18} />
-              Order Summary
-            </h2>
+          {/* ── Right: summary ── */}
+          <motion.div className={styles.summary}
+            initial={{ opacity:0, y:20 }} animate={{ opacity:1, y:0 }} transition={{ delay:0.2 }}>
+            <h2 className={styles.summaryTitle}><Package size={16} /> Order summary</h2>
 
             <div className={styles.orderItems}>
-              {items.length === 0 ? (
-                <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>Your cart is empty</p>
-              ) : items.map(item => (
-                <div key={item.id} className={styles.orderItem}>
-                  <div className={styles.orderItemImg}>
-                    {item.product?.image
-                      ? <img src={getImageUrl(item.product.image)} alt={item.product.product_name} />
-                      : <Package size={16} />}
+              {items.length === 0
+                ? <p style={{ fontSize:13, color:'var(--text-muted)' }}>Your cart is empty</p>
+                : items.map(item => (
+                  <div key={item.id} className={styles.orderItem}>
+                    <div className={styles.orderItemImg}>
+                      {item.product?.image
+                        ? <img src={getImageUrl(item.product.image)} alt={item.product.product_name} />
+                        : <Package size={14} />}
+                    </div>
+                    <div className={styles.orderItemInfo}>
+                      <span className={styles.orderItemName}>{item.product?.product_name}</span>
+                      <span className={styles.orderItemQty}>Qty: {item.quantity}</span>
+                    </div>
+                    <span className={styles.orderItemPrice}>
+                      ₹{(item.product?.price * item.quantity)?.toLocaleString('en-IN')}
+                    </span>
                   </div>
-                  <div className={styles.orderItemInfo}>
-                    <span className={styles.orderItemName}>{item.product?.product_name}</span>
-                    <span className={styles.orderItemQty}>Qty: {item.quantity}</span>
-                  </div>
-                  <span className={styles.orderItemPrice}>
-                    ₹{(item.product?.price * item.quantity)?.toLocaleString('en-IN')}
-                  </span>
-                </div>
-              ))}
+                ))
+              }
             </div>
 
             <div className={styles.summaryTotalRow}>
@@ -270,26 +259,45 @@ export default function Checkout() {
               className={`btn btn-primary ${styles.placeBtn}`}
               onClick={placeOrder}
               disabled={placing || items.length === 0}
-              whileTap={{ scale: 0.97 }}
+              whileTap={{ scale:0.97 }}
             >
-              {placing ? (
-                <span style={{
-                  width: 20, height: 20, borderRadius: '50%',
-                  border: '2px solid rgba(255,255,255,0.3)',
-                  borderTopColor: 'white', display: 'inline-block',
-                  animation: 'spin 0.7s linear infinite'
-                }} />
-              ) : (
-                <>
-                  <CheckCircle2 size={18} />
-                  {!isAuthenticated
-                    ? 'Log in to Order'
-                    : paymentMethod === 'cod' ? 'Place Order' : 'Pay Now'}
-                </>
-              )}
+              {placing
+                ? <span style={{ width:18, height:18, borderRadius:'50%', border:'2px solid rgba(255,255,255,.3)', borderTopColor:'#fff', display:'inline-block', animation:'spin .65s linear infinite' }} />
+                : <><CheckCircle2 size={16} />{!isAuthenticated ? 'Log in to order' : paymentMethod === 'cod' ? 'Place order' : 'Pay now'}</>
+              }
             </motion.button>
           </motion.div>
         </div>
+      </div>
+    </div>
+  )
+}
+
+function AddressFields({ form, handleChange }) {
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:12, marginTop:12 }}>
+      <div>
+        <label className="label">Street address</label>
+        <textarea name="address" className="input" rows={2} style={{ resize:'none' }}
+          placeholder="123 Main Street, Apt 4B"
+          value={form.address} onChange={handleChange} />
+      </div>
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+        <div>
+          <label className="label">City</label>
+          <input name="city" className="input" placeholder="Chennai"
+            value={form.city} onChange={handleChange} />
+        </div>
+        <div>
+          <label className="label">Postal code</label>
+          <input name="postal_code" className="input" placeholder="600001"
+            value={form.postal_code} onChange={handleChange} />
+        </div>
+      </div>
+      <div>
+        <label className="label">Country</label>
+        <input name="country" className="input" placeholder="India"
+          value={form.country} onChange={handleChange} />
       </div>
     </div>
   )
