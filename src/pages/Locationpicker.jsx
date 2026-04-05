@@ -41,7 +41,7 @@ import {
 } from 'react'
 import mapboxgl from 'mapbox-gl'
 import 'mapbox-gl/dist/mapbox-gl.css'
-import styles from './LocationPicker.module.css'
+import styles from './Locationpicker.module.css'
 const TOKEN          = import.meta.env.VITE_MAPBOX_TOKEN || ''
 const DEFAULT_CENTER = [80.2707, 13.0827] 
 const DEFAULT_ZOOM   = 11
