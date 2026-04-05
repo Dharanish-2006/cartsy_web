@@ -32,7 +32,7 @@ import { cartService, orderService } from '../services'
 import { getImageUrl } from '../utils/api'
 import { useCart } from '../context/CartContext'
 import { useAuth } from '../context/AuthContext'
-import LocationPicker from '../components/LocationPicker'
+import LocationPicker from './Locationpicker'
 import styles from './Checkout.module.css'
 
 const MODE_MAP    = 'map'
