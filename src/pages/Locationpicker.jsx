@@ -1,69 +1,58 @@
 /**
- * LocationPicker.jsx — production-optimized
+ * LocationPicker.jsx
  *
- * Fix summary vs previous version:
- *
- * 1. AbortController on every fetch
- *    reverseGeocode() and searchPlaces() both accept a signal. A single
- *    geocodeAbortRef holds the controller for the active reverse-geocode request.
- *    A single searchAbortRef holds the controller for the active search request.
- *    Before each new fetch we call .abort() on the previous controller, so only
- *    the most-recent request can ever call setState.
- *
- * 2. Debounce for map interactions (click / dragend) and search input
- *    mapDebounceRef holds a setTimeout id. On every click/drag we clear the
- *    previous timer and set a new 350 ms one. The user has to "settle" before
- *    a fetch fires. Search input is debounced with a separate 300 ms timer.
- *
- * 3. One in-flight reverse-geocode at a time
- *    geocodingRef is a boolean flag. If a geocode is already in progress we
- *    abort it first, then set the flag, then fetch. This prevents N concurrent
- *    requests even if the debounce fires while a slow fetch is still running.
- *
- * 4. Stale-closure fix for map event listeners
- *    Map events are registered once at mount and must not re-register on every
- *    render (that would leak listeners). We store mutable state in a ref
- *    (resolvePointRef) so the event handlers always call the latest version of
- *    the function without needing to re-register.
- *
- * 5. isMounted guard
- *    A mountedRef is set false in the useEffect cleanup. Every async path that
- *    calls setState checks mountedRef.current first so we never update state on
- *    an unmounted component.
- *
- * 6. Full cleanup
- *    useEffect returns a teardown that aborts any in-flight fetch, clears the
- *    debounce timer, removes the Mapbox instance, and resets all refs.
+ * Firefox crash fixes applied in this version
+ * ─────────────────────────────────────────────
+ * 1. TOKEN guard before map init — empty token throws in Firefox WebGL
+ * 2. res.ok checked before res.json() — prevents crash on 401/403 from bad token
+ * 3. overflow:hidden removed from map wrapper — was creating a stacking context
+ *    around the WebGL canvas that leaked GPU compositor layers in Firefox
+ * 4. backdrop-filter removed from mapHint — Firefox requires -webkit- prefix and
+ *    the fallback path triggered a compositor layer explosion causing RAM spike
+ * 5. Early-return cleanup — the StrictMode double-invoke guard now returns a
+ *    no-op cleanup so React doesn't leak the effect on the second call
+ * 6. All fetch paths validate res.ok before parsing JSON — a 401 from an invalid
+ *    Mapbox token returns HTML, calling .json() on it throws a SyntaxError that
+ *    is NOT an AbortError, so it falls through to the catch and crashes Firefox
  */
 
-import {
-  useEffect, useRef, useState, useCallback, useMemo,
-} from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import mapboxgl from 'mapbox-gl'
 import 'mapbox-gl/dist/mapbox-gl.css'
-import styles from './Locationpicker.module.css'
+import styles from './LocationPicker.module.css'
+
+// ─── Constants ────────────────────────────────────────────────────────────────
 const TOKEN          = import.meta.env.VITE_MAPBOX_TOKEN || ''
-const DEFAULT_CENTER = [80.2707, 13.0827] 
+const DEFAULT_CENTER = [80.2707, 13.0827]
 const DEFAULT_ZOOM   = 11
 const MAP_DRAG_DELAY = 350
 const SEARCH_DELAY   = 300
 
-mapboxgl.accessToken = TOKEN
+// Set once at module level — only if we have a token
+if (TOKEN) mapboxgl.accessToken = TOKEN
+
+// ─── Fetch helpers (signal-aware, res.ok validated) ───────────────────────────
+
 async function reverseGeocode(lng, lat, signal) {
   const url =
     `https://api.mapbox.com/geocoding/v5/mapbox.places/${lng},${lat}.json` +
     `?types=address,place,postcode,country&language=en&access_token=${TOKEN}`
 
-  const res  = await fetch(url, { signal })
-  const data = await res.json()
+  const res = await fetch(url, { signal })
 
+  // res.ok check: a bad token returns 401 with HTML body, not JSON.
+  // Calling .json() on HTML throws SyntaxError — not AbortError — crashing the
+  // catch block's name check and leaving the component in a broken state.
+  if (!res.ok) throw new Error(`Geocoding HTTP ${res.status}`)
+
+  const data = await res.json()
   if (!data.features?.length) return null
 
   const feature = data.features[0]
   const ctx     = feature.context || []
-  const get     = (type) => ctx.find((c) => c.id.startsWith(type))?.text || ''
+  const get     = (type) => ctx.find((c) => c.id?.startsWith(type))?.text || ''
 
-  const street = feature.place_type.includes('address')
+  const street = feature.place_type?.includes('address')
     ? `${feature.address || ''} ${feature.text || ''}`.trim()
     : feature.place_name?.split(',')[0] || ''
 
@@ -78,49 +67,60 @@ async function reverseGeocode(lng, lat, signal) {
 }
 
 async function searchPlaces(query, signal) {
-  if (query.length < 2) return []
+  if (!query || query.length < 2) return []
+
   const url =
     `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json` +
     `?proximity=ip&language=en&limit=5&access_token=${TOKEN}`
-  const res  = await fetch(url, { signal })
+
+  const res = await fetch(url, { signal })
+  if (!res.ok) return []          // soft-fail on search errors — don't crash
+
   const data = await res.json()
-  return data.features || []
+  return Array.isArray(data.features) ? data.features : []
 }
 
-export default function LocationPicker({ onAddressResolved, existingAddress = '' }) {
-  const mapContainerRef  = useRef(null)
-  const mapRef           = useRef(null)
-  const markerRef        = useRef(null)
-  const mountedRef       = useRef(true)  
-  const geocodingRef     = useRef(false) 
-  const geocodeAbortRef  = useRef(null)  
-  const searchAbortRef   = useRef(null)  
-  const mapDebounceRef   = useRef(null)
-  const searchDebounceRef= useRef(null)
-  const resolvePointRef  = useRef(null)
-  const onAddressResolvedRef = useRef(onAddressResolved)
-  useEffect(() => { onAddressResolvedRef.current = onAddressResolved }, [onAddressResolved])
+// ─── Component ────────────────────────────────────────────────────────────────
 
+export default function LocationPicker({ onAddressResolved, existingAddress = '' }) {
+  const mapContainerRef   = useRef(null)
+  const mapRef            = useRef(null)
+  const markerRef         = useRef(null)
+
+  // Lifecycle guards
+  const mountedRef        = useRef(true)
+  const geocodeAbortRef   = useRef(null)
+  const searchAbortRef    = useRef(null)
+  const mapDebounceRef    = useRef(null)
+  const searchDebounceRef = useRef(null)
+
+  // Stable function refs so map events never hold stale closures
+  const resolvePointRef       = useRef(null)
+  const debouncedResolveRef   = useRef(null)
+  const onAddressResolvedRef  = useRef(onAddressResolved)
+
+  // Keep callback ref current on every render
+  useEffect(() => {
+    onAddressResolvedRef.current = onAddressResolved
+  }, [onAddressResolved])
+
+  // UI state
   const [loading,     setLoading]     = useState(false)
   const [gpsLoading,  setGpsLoading]  = useState(false)
   const [searchQuery, setSearchQuery] = useState(existingAddress)
   const [suggestions, setSuggestions] = useState([])
   const [resolved,    setResolved]    = useState(null)
   const [error,       setError]       = useState('')
+  const [noToken,     setNoToken]     = useState(!TOKEN)
 
+  // ── Core geocode ─────────────────────────────────────────────────────────────
   const resolvePoint = useCallback(async (lng, lat) => {
-    if (geocodeAbortRef.current) {
-      geocodeAbortRef.current.abort()
-    }
-
+    // Cancel previous geocode
+    geocodeAbortRef.current?.abort()
     const controller = new AbortController()
     geocodeAbortRef.current = controller
-    geocodingRef.current    = true
 
-    if (mountedRef.current) {
-      setLoading(true)
-      setError('')
-    }
+    if (mountedRef.current) { setLoading(true); setError('') }
 
     try {
       const addr = await reverseGeocode(lng, lat, controller.signal)
@@ -131,82 +131,107 @@ export default function LocationPicker({ onAddressResolved, existingAddress = ''
         setSearchQuery(addr.address)
         onAddressResolvedRef.current?.(addr)
       } else {
-        setError('Could not determine address for this location.')
+        setError('No address found for this location.')
       }
     } catch (err) {
       if (err.name === 'AbortError' || !mountedRef.current) return
-      setError('Geocoding failed. Check your Mapbox token.')
+      // Distinguish token error from network error for clearer messaging
+      const msg = err.message?.includes('401') || err.message?.includes('403')
+        ? 'Invalid Mapbox token. Set VITE_MAPBOX_TOKEN in your .env'
+        : 'Geocoding failed. Check your connection.'
+      if (mountedRef.current) setError(msg)
     } finally {
       if (mountedRef.current) setLoading(false)
-      geocodingRef.current = false
     }
   }, [])
+
   useEffect(() => { resolvePointRef.current = resolvePoint }, [resolvePoint])
 
+  // ── Debounced map resolve ─────────────────────────────────────────────────────
   const debouncedResolve = useCallback((lng, lat) => {
     clearTimeout(mapDebounceRef.current)
-    mapDebounceRef.current = setTimeout(() => {
-      resolvePointRef.current?.(lng, lat)
-    }, MAP_DRAG_DELAY)
+    mapDebounceRef.current = setTimeout(() => resolvePointRef.current?.(lng, lat), MAP_DRAG_DELAY)
   }, [])
 
-  const debouncedResolveRef = useRef(debouncedResolve)
   useEffect(() => { debouncedResolveRef.current = debouncedResolve }, [debouncedResolve])
+
+  // ── Map init ─────────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (mapRef.current) return 
+    // Guard: no token → show error, don't init WebGL at all
+    if (!TOKEN) { setNoToken(true); return }
 
-    const map = new mapboxgl.Map({
-      container:        mapContainerRef.current,
-      style:            'mapbox://styles/mapbox/dark-v11',
-      center:           DEFAULT_CENTER,
-      zoom:             DEFAULT_ZOOM,
-      fadeDuration:     0,
-      trackResize:      true,
-      attributionControl: false,
-    })
-    mapRef.current = map
+    // StrictMode double-invoke guard — must return cleanup even on early return
+    if (mapRef.current) return () => {}
 
-    map.addControl(
-      new mapboxgl.NavigationControl({ showCompass: false }),
-      'top-right',
-    )
+    let map
+    let marker
 
-    const marker = new mapboxgl.Marker({ color: '#7c6aff', draggable: true })
-      .setLngLat(DEFAULT_CENTER)
-      .addTo(map)
-    markerRef.current = marker
+    try {
+      map = new mapboxgl.Map({
+        container:          mapContainerRef.current,
+        style:              'mapbox://styles/mapbox/dark-v11',
+        center:             DEFAULT_CENTER,
+        zoom:               DEFAULT_ZOOM,
+        fadeDuration:       0,
+        attributionControl: false,
+        // Firefox perf: disable pitch/rotation which adds compositor layers
+        pitchWithRotate:    false,
+        dragRotate:         false,
+      })
+      mapRef.current = map
 
-    const onDragEnd = () => {
-      const { lng, lat } = marker.getLngLat()
-      debouncedResolveRef.current(lng, lat)
+      map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'top-right')
+
+      marker = new mapboxgl.Marker({ color: '#7c6aff', draggable: true })
+        .setLngLat(DEFAULT_CENTER)
+        .addTo(map)
+      markerRef.current = marker
+
+    } catch (err) {
+      // WebGL creation can fail in Firefox with privacy.resistFingerprinting=true
+      if (mountedRef.current) {
+        setError('Map could not start. Try enabling WebGL in Firefox settings.')
+      }
+      return () => {}
     }
 
+    // Named handlers so we can remove them exactly
+    const onDragEnd = () => {
+      const { lng, lat } = marker.getLngLat()
+      debouncedResolveRef.current?.(lng, lat)
+    }
     const onMapClick = (e) => {
       const { lng, lat } = e.lngLat
       marker.setLngLat([lng, lat])
-      debouncedResolveRef.current(lng, lat)
+      debouncedResolveRef.current?.(lng, lat)
     }
 
     marker.on('dragend', onDragEnd)
-    map.on('click', onMapClick)
+    map.on('click',      onMapClick)
 
     return () => {
       mountedRef.current = false
 
+      // Abort in-flight requests
       geocodeAbortRef.current?.abort()
       searchAbortRef.current?.abort()
 
+      // Clear timers
       clearTimeout(mapDebounceRef.current)
       clearTimeout(searchDebounceRef.current)
 
-      marker.off('dragend', onDragEnd)
-      map.off('click', onMapClick)
+      // Remove event listeners before destroying map
+      try { marker.off('dragend', onDragEnd) } catch {}
+      try { map.off('click', onMapClick)     } catch {}
 
-      map.remove()
+      // Destroy Mapbox — releases WebGL context + GPU memory
+      try { map.remove() } catch {}
       mapRef.current    = null
       markerRef.current = null
     }
-  }, []) 
+  }, []) // empty deps — everything mutable accessed via refs
+
+  // ── GPS ───────────────────────────────────────────────────────────────────────
   const handleGPS = useCallback(() => {
     if (!navigator.geolocation) {
       setError('Geolocation is not supported by your browser.')
@@ -219,7 +244,7 @@ export default function LocationPicker({ onAddressResolved, existingAddress = ''
       ({ coords }) => {
         if (!mountedRef.current) return
         const { longitude: lng, latitude: lat } = coords
-        mapRef.current?.flyTo({ center: [lng, lat], zoom: 15, duration: 1200 })
+        mapRef.current?.flyTo({ center: [lng, lat], zoom: 15, duration: 900 })
         markerRef.current?.setLngLat([lng, lat])
         resolvePointRef.current?.(lng, lat)
         setGpsLoading(false)
@@ -229,33 +254,31 @@ export default function LocationPicker({ onAddressResolved, existingAddress = ''
         setGpsLoading(false)
         setError(
           err.code === 1
-            ? 'Location access denied. Please allow location in your browser.'
-            : 'Unable to retrieve your location.',
+            ? 'Location access denied. Allow location in your browser settings.'
+            : 'Could not detect your location.',
         )
       },
       { enableHighAccuracy: true, timeout: 10_000 },
     )
-  }, []) 
+  }, [])
+
+  // ── Search ────────────────────────────────────────────────────────────────────
   const handleSearchInput = useCallback((e) => {
     const q = e.target.value
     setSearchQuery(q)
     clearTimeout(searchDebounceRef.current)
     searchAbortRef.current?.abort()
-    if (q.length < 2) { setSuggestions([]); return }
+
+    if (!q || q.length < 2) { setSuggestions([]); return }
 
     searchDebounceRef.current = setTimeout(async () => {
       const controller = new AbortController()
       searchAbortRef.current = controller
-
       try {
         const results = await searchPlaces(q, controller.signal)
-        if (!controller.signal.aborted && mountedRef.current) {
-          setSuggestions(results)
-        }
+        if (!controller.signal.aborted && mountedRef.current) setSuggestions(results)
       } catch (err) {
-        if (err.name !== 'AbortError' && mountedRef.current) {
-          setSuggestions([])
-        }
+        if (err.name !== 'AbortError' && mountedRef.current) setSuggestions([])
       }
     }, SEARCH_DELAY)
   }, [])
@@ -263,7 +286,6 @@ export default function LocationPicker({ onAddressResolved, existingAddress = ''
   const handleSuggestionClick = useCallback((feature) => {
     clearTimeout(searchDebounceRef.current)
     searchAbortRef.current?.abort()
-
     const [lng, lat] = feature.center
     setSuggestions([])
     setSearchQuery(feature.place_name)
@@ -286,9 +308,24 @@ export default function LocationPicker({ onAddressResolved, existingAddress = ''
       : '',
     [resolved],
   )
+
+  // ── No-token fallback ────────────────────────────────────────────────────────
+  if (noToken) {
+    return (
+      <div className={styles.noToken}>
+        <ErrorIcon />
+        <div>
+          <strong>Map unavailable</strong>
+          <p>Add <code>VITE_MAPBOX_TOKEN</code> to your <code>.env</code> to enable the map picker.</p>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className={styles.wrapper}>
 
+      {/* Search bar */}
       <div className={styles.searchRow}>
         <div className={styles.searchBox}>
           <SearchIcon className={styles.searchIcon} />
@@ -301,11 +338,9 @@ export default function LocationPicker({ onAddressResolved, existingAddress = ''
             spellCheck={false}
           />
           {searchQuery && (
-            <button
-              className={styles.clearBtn}
-              onClick={handleClearSearch}
-              aria-label="Clear search"
-            >✕</button>
+            <button className={styles.clearBtn} onClick={handleClearSearch} aria-label="Clear">
+              ✕
+            </button>
           )}
         </div>
 
@@ -313,27 +348,19 @@ export default function LocationPicker({ onAddressResolved, existingAddress = ''
           className={styles.gpsBtn}
           onClick={handleGPS}
           disabled={gpsLoading}
-          title="Use my current location"
-          aria-label="Detect my location"
+          aria-label="Use my location"
         >
-          {gpsLoading
-            ? <span className={styles.spinner} aria-hidden />
-            : <GpsIcon />
-          }
+          {gpsLoading ? <span className={styles.spinner} aria-hidden /> : <GpsIcon />}
           <span>{gpsLoading ? 'Detecting…' : 'Use my location'}</span>
         </button>
       </div>
 
+      {/* Suggestions */}
       {suggestions.length > 0 && (
         <ul className={styles.suggestions} role="listbox">
           {suggestions.map((s) => (
-            <li
-              key={s.id}
-              className={styles.suggestion}
-              role="option"
-              aria-selected={false}
-              onClick={() => handleSuggestionClick(s)}
-            >
+            <li key={s.id} className={styles.suggestion} role="option" aria-selected={false}
+              onClick={() => handleSuggestionClick(s)}>
               <PinIcon />
               <span>{s.place_name}</span>
             </li>
@@ -341,22 +368,22 @@ export default function LocationPicker({ onAddressResolved, existingAddress = ''
         </ul>
       )}
 
+      {/* Map — NO overflow:hidden on wrapper, no backdrop-filter on overlay */}
       <div className={styles.mapWrap}>
         <div ref={mapContainerRef} className={styles.map} />
-
         {loading && (
           <div className={styles.mapOverlay} aria-live="polite">
             <span className={styles.spinner} aria-hidden />
             <span>Resolving address…</span>
           </div>
         )}
-
         <div className={styles.mapHint} aria-hidden>
           <PinIcon />
           Drag the pin or tap the map to set your location
         </div>
       </div>
 
+      {/* Resolved */}
       {resolved && !loading && (
         <div className={styles.resolvedCard} role="status" aria-live="polite">
           <CheckIcon />
@@ -367,6 +394,7 @@ export default function LocationPicker({ onAddressResolved, existingAddress = ''
         </div>
       )}
 
+      {/* Error */}
       {error && (
         <div className={styles.errorMsg} role="alert">
           <ErrorIcon />
@@ -377,57 +405,27 @@ export default function LocationPicker({ onAddressResolved, existingAddress = ''
     </div>
   )
 }
-const SVG_PROPS = {
-  viewBox: '0 0 24 24',
-  fill: 'none',
-  stroke: 'currentColor',
-  strokeWidth: '2',
-  strokeLinecap: 'round',
-  strokeLinejoin: 'round',
+
+// ─── Icons (module-scope = stable references, no re-creation per render) ───────
+
+const S = {
+  viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+  strokeWidth: '2', strokeLinecap: 'round', strokeLinejoin: 'round',
   'aria-hidden': true,
 }
 
 function SearchIcon({ className }) {
-  return (
-    <svg {...SVG_PROPS} className={className}>
-      <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
-    </svg>
-  )
+  return <svg {...S} className={className}><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
 }
-
 function GpsIcon() {
-  return (
-    <svg {...SVG_PROPS}>
-      <circle cx="12" cy="12" r="3" />
-      <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
-      <path d="M12 2a10 10 0 100 20A10 10 0 0012 2z" strokeOpacity=".3" />
-    </svg>
-  )
+  return <svg {...S}><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><path d="M12 2a10 10 0 100 20A10 10 0 0012 2z" strokeOpacity=".3"/></svg>
 }
-
 function PinIcon() {
-  return (
-    <svg {...SVG_PROPS}>
-      <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z" />
-      <circle cx="12" cy="10" r="3" />
-    </svg>
-  )
+  return <svg {...S}><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
 }
-
 function CheckIcon() {
-  return (
-    <svg {...SVG_PROPS} stroke="var(--success)">
-      <polyline points="20 6 9 17 4 12" />
-    </svg>
-  )
+  return <svg {...S} stroke="var(--success)"><polyline points="20 6 9 17 4 12"/></svg>
 }
-
 function ErrorIcon() {
-  return (
-    <svg {...SVG_PROPS}>
-      <circle cx="12" cy="12" r="10" />
-      <line x1="12" y1="8" x2="12" y2="12" />
-      <line x1="12" y1="16" x2="12.01" y2="16" />
-    </svg>
-  )
+  return <svg {...S}><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
 }
