@@ -1,26 +1,3 @@
-/**
- * Checkout.jsx
- *
- * Firefox crash fixes applied in this version
- * ────────────────────────────────────────────
- * 1. AnimatePresence height:auto removed — animating height to 'auto' causes
- *    Firefox to run continuous reflow loops, spiking CPU and RAM. Replaced with
- *    CSS transitions on max-height which are compositor-friendly.
- *
- * 2. motion.div NOT wrapping LocationPicker — Framer Motion's rAF loop was
- *    fighting Mapbox's WebGL render loop for the compositor. The map section
- *    uses a plain div with a CSS opacity transition instead.
- *
- * 3. Razorpay popup — Firefox blocks popups that are not called within the same
- *    synchronous frame as the user gesture. Solution: pre-fetch the Razorpay
- *    order config while the user clicks "Pay now", store it in a ref, then call
- *    rzp.open() immediately inside the button handler's microtask chain using
- *    a direct Promise chain (not async/await which breaks gesture frames in FF).
- *
- * 4. Spinner uses CSS animation defined in index.css (global @keyframes spin)
- *    instead of inline style animation string which Firefox doesn't always parse.
- */
-
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import {
@@ -28,12 +5,19 @@ import {
   LogIn, Map, PenLine, ChevronDown, ChevronUp,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
-import { cartService, orderService } from '../services'
-import { getImageUrl } from '../utils/api'
+import { api, getImageUrl } from '../utils/api'
 import { useCart } from '../context/CartContext'
 import { useAuth } from '../context/AuthContext'
-import LocationPicker from './Locationpicker'
 import styles from './Checkout.module.css'
+
+const cartService = {
+  get: () => api.get('/api/cart/').then(r => r.data),
+}
+const orderService = {
+  createCOD:      (payload) => api.post('/api/orders/create/',           { ...payload, payment_method: 'COD' }).then(r => r.data),
+  createRazorpay: (payload) => api.post('/api/orders/razorpay/',         payload).then(r => r.data),
+  verifyRazorpay: (payload) => api.post('/api/orders/razorpay/verify/',  payload).then(r => r.data),
+}
 
 const MODE_MAP    = 'map'
 const MODE_MANUAL = 'manual'
@@ -44,21 +28,15 @@ export default function Checkout() {
   const [paymentMethod, setPaymentMethod] = useState('cod')
   const [loading,       setLoading]       = useState(true)
   const [placing,       setPlacing]       = useState(false)
-  const [addressMode,   setAddressMode]   = useState(MODE_MAP)
+  const [addressMode,   setAddressMode]   = useState(MODE_MANUAL)
   const [fieldsOpen,    setFieldsOpen]    = useState(true)
 
   const navigate            = useNavigate()
   const { setCartCount }    = useCart()
   const { isAuthenticated } = useAuth()
 
-  // Holds the Razorpay options object pre-built while network request is in
-  // flight, so rzp.open() can fire synchronously inside the gesture frame.
-  const razorpayConfigRef = useRef(null)
-  const mountedRef        = useRef(true)
-
-  useEffect(() => {
-    return () => { mountedRef.current = false }
-  }, [])
+  const mountedRef = useRef(true)
+  useEffect(() => () => { mountedRef.current = false }, [])
 
   const [form, setForm] = useState({
     full_name: '', address: '', city: '', postal_code: '', country: '',
@@ -105,11 +83,14 @@ export default function Checkout() {
     return true
   }, [form])
 
-  // ── Place order ──────────────────────────────────────────────────────────────
   const placeOrder = useCallback(() => {
-    if (!isAuthenticated) { toast.error('Please log in first'); navigate('/login'); return }
-    if (!validateForm())  return
-    if (items.length === 0) { toast.error('Your cart is empty'); return }
+    if (!isAuthenticated) {
+      toast.error('Please log in first')
+      navigate('/login')
+      return
+    }
+    if (!validateForm())       return
+    if (items.length === 0)    { toast.error('Your cart is empty'); return }
 
     setPlacing(true)
 
@@ -117,30 +98,25 @@ export default function Checkout() {
       orderService.createCOD(form)
         .then(res => {
           if (!mountedRef.current) return
-          if (res.order_id) { setCartCount(0); toast.success('Order placed!'); navigate('/orders') }
+          if (res.order_id) {
+            setCartCount(0)
+            toast.success('Order placed successfully!')
+            navigate('/orders')
+          } else {
+            toast.error(res.error || 'Failed to place order')
+            setPlacing(false)
+          }
         })
         .catch(err => {
           if (!mountedRef.current) return
           toast.error(err?.response?.data?.error || 'Failed to place order')
+          setPlacing(false)
         })
-        .finally(() => { if (mountedRef.current) setPlacing(false) })
       return
     }
 
-    // ── Razorpay ──────────────────────────────────────────────────────────────
-    // Firefox: popup must open in the same gesture frame. We can't open it
-    // inside an async/await chain because Firefox loses the gesture context.
-    // Strategy:
-    //   1. Create the Razorpay instance immediately (synchronous)
-    //   2. Fetch the order config in the background
-    //   3. When config arrives, call rzp.open() — Firefox still considers this
-    //      within the original gesture context because no new task boundary
-    //      was created (Promise continuations stay in the microtask queue).
-    //
-    // Note: window.Razorpay must already be loaded (checkout.js in index.html)
-
     if (typeof window.Razorpay === 'undefined') {
-      toast.error('Payment system not loaded. Please refresh the page.')
+      toast.error('Payment gateway not loaded — please refresh the page.')
       setPlacing(false)
       return
     }
@@ -156,14 +132,21 @@ export default function Checkout() {
           name:      'Cartsy',
           order_id,
           handler: (response) => {
-            orderService.verifyRazorpay(response)
+            orderService.verifyRazorpay({
+              razorpay_order_id:   response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature:  response.razorpay_signature,
+            })
               .then(() => {
                 if (!mountedRef.current) return
                 setCartCount(0)
                 toast.success('Payment successful!')
                 navigate('/orders')
               })
-              .catch(() => toast.error('Payment verification failed'))
+              .catch(() => {
+                toast.error('Payment verification failed — contact support.')
+                if (mountedRef.current) setPlacing(false)
+              })
           },
           modal: {
             ondismiss: () => {
@@ -174,11 +157,6 @@ export default function Checkout() {
           theme: { color: '#7c6aff' },
         }
 
-        // Store for potential re-use (e.g. user dismisses and retries)
-        razorpayConfigRef.current = options
-
-        // open() here is still in the Promise microtask chain of the original
-        // user gesture — Firefox allows this
         const rzp = new window.Razorpay(options)
         rzp.open()
       })
@@ -222,55 +200,45 @@ export default function Checkout() {
                 <h2 className={styles.sectionTitle}>Delivery address</h2>
                 <div className={styles.modeToggle}>
                   <button
-                    className={`${styles.modeBtn} ${addressMode === MODE_MAP    ? styles.modeBtnActive : ''}`}
-                    onClick={() => setAddressMode(MODE_MAP)}
-                  ><Map size={12} /> Map</button>
-                  <button
                     className={`${styles.modeBtn} ${addressMode === MODE_MANUAL ? styles.modeBtnActive : ''}`}
                     onClick={() => setAddressMode(MODE_MANUAL)}
                   ><PenLine size={12} /> Manual</button>
+                  <button
+                    className={`${styles.modeBtn} ${addressMode === MODE_MAP ? styles.modeBtnActive : ''}`}
+                    onClick={() => setAddressMode(MODE_MAP)}
+                  ><Map size={12} /> Map</button>
                 </div>
               </div>
 
               {/* Full name — always visible */}
               <div style={{ marginBottom: 14 }}>
                 <label className="label">Full name</label>
-                <input name="full_name" className="input" placeholder="Arjun Sharma"
-                  value={form.full_name} onChange={handleChange} />
-              </div>
-
-              {/* Map mode — plain CSS transition, NOT motion.div wrapping the map.
-                  Firefox: animating height:auto with Framer Motion causes the
-                  layout engine to recalculate the page height on every rAF tick,
-                  fighting WebGL for the compositor and spiking RAM. */}
-              <div
-                className={styles.modePanel}
-                style={{ display: addressMode === MODE_MAP ? 'block' : 'none' }}
-              >
-                {/* LocationPicker is NOT inside motion.div or AnimatePresence.
-                    Framer Motion's rAF loop + Mapbox WebGL rAF loop = two
-                    competing animation frames that deadlock Firefox's compositor. */}
-                <LocationPicker
-                  onAddressResolved={handleAddressResolved}
-                  existingAddress={form.address}
+                <input
+                  name="full_name"
+                  className="input"
+                  placeholder="Arjun Sharma"
+                  value={form.full_name}
+                  onChange={handleChange}
+                  autoComplete="name"
                 />
-
-                <button className={styles.overrideToggle} onClick={() => setFieldsOpen(o => !o)}>
-                  {fieldsOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-                  {fieldsOpen ? 'Hide' : 'Edit'} address fields
-                </button>
-
-                {/* CSS max-height transition instead of Framer Motion height:auto */}
-                <div className={`${styles.fieldsCollapse} ${fieldsOpen ? styles.fieldsOpen : ''}`}>
-                  <AddressFields form={form} handleChange={handleChange} />
-                </div>
               </div>
 
+              {/* Manual mode */}
               <div
-                className={styles.modePanel}
                 style={{ display: addressMode === MODE_MANUAL ? 'block' : 'none' }}
               >
                 <AddressFields form={form} handleChange={handleChange} />
+              </div>
+              <div
+                style={{ display: addressMode === MODE_MAP ? 'block' : 'none' }}
+              >
+                <MapAddressSection
+                  form={form}
+                  handleChange={handleChange}
+                  fieldsOpen={fieldsOpen}
+                  setFieldsOpen={setFieldsOpen}
+                  onAddressResolved={handleAddressResolved}
+                />
               </div>
             </div>
 
@@ -282,8 +250,8 @@ export default function Checkout() {
               </div>
               <div className={styles.paymentOptions}>
                 {[
-                  { value: 'cod',      label: 'Cash on delivery', desc: 'Pay when your order arrives', icon: <Truck size={18} /> },
-                  { value: 'razorpay', label: 'Pay online',        desc: 'UPI, cards, netbanking',      icon: <CreditCard size={18} /> },
+                  { value: 'cod',      label: 'Cash on delivery', desc: 'Pay when your order arrives',    icon: <Truck size={18} /> },
+                  { value: 'razorpay', label: 'Pay online',       desc: 'UPI, cards, netbanking via Razorpay', icon: <CreditCard size={18} /> },
                 ].map(opt => (
                   <button
                     key={opt.value}
@@ -357,35 +325,109 @@ export default function Checkout() {
   )
 }
 
-// ── Address fields — extracted, stable, no motion wrappers ────────────────────
 function AddressFields({ form, handleChange }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div>
         <label className="label">Street address</label>
         <textarea
-          name="address" className="input" rows={2}
+          name="address"
+          className="input"
+          rows={2}
           style={{ resize: 'none' }}
-          placeholder="123 Main Street, Apt 4B"
-          value={form.address} onChange={handleChange}
+          placeholder="123 Anna Salai, Apt 4B"
+          value={form.address}
+          onChange={handleChange}
+          autoComplete="street-address"
         />
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
         <div>
           <label className="label">City</label>
-          <input name="city" className="input" placeholder="Chennai"
-            value={form.city} onChange={handleChange} />
+          <input
+            name="city"
+            className="input"
+            placeholder="Chennai"
+            value={form.city}
+            onChange={handleChange}
+            autoComplete="address-level2"
+          />
         </div>
         <div>
           <label className="label">Postal code</label>
-          <input name="postal_code" className="input" placeholder="600001"
-            value={form.postal_code} onChange={handleChange} />
+          <input
+            name="postal_code"
+            className="input"
+            placeholder="600001"
+            value={form.postal_code}
+            onChange={handleChange}
+            autoComplete="postal-code"
+          />
         </div>
       </div>
       <div>
         <label className="label">Country</label>
-        <input name="country" className="input" placeholder="India"
-          value={form.country} onChange={handleChange} />
+        <input
+          name="country"
+          className="input"
+          placeholder="India"
+          value={form.country}
+          onChange={handleChange}
+          autoComplete="country-name"
+        />
+      </div>
+    </div>
+  )
+}
+
+function MapAddressSection({ form, handleChange, fieldsOpen, setFieldsOpen, onAddressResolved }) {
+  const [LocationPicker, setLocationPicker] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    import('./Locationpicker')
+      .then(m => { if (!cancelled) setLocationPicker(() => m.default) })
+      .catch(() => { /* Locationpicker not available — map mode will show a fallback */ })
+    return () => { cancelled = true }
+  }, [])
+
+  return (
+    <div>
+      {LocationPicker
+        ? (
+          <div style={{ opacity: 1, transition: 'opacity 0.2s' }}>
+            <LocationPicker
+              onAddressResolved={onAddressResolved}
+              existingAddress={form.address}
+            />
+          </div>
+        )
+        : (
+          <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 12 }}>
+            Map picker unavailable — please fill in the address manually below.
+          </p>
+        )
+      }
+
+      <button
+        style={{
+          background: 'none', border: 'none', color: 'var(--text-muted)',
+          fontSize: 12, display: 'flex', alignItems: 'center', gap: 4,
+          cursor: 'pointer', marginTop: 8, padding: 0,
+        }}
+        onClick={() => setFieldsOpen(o => !o)}
+      >
+        {fieldsOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+        {fieldsOpen ? 'Hide' : 'Edit'} address fields
+      </button>
+      <div style={{
+        maxHeight: fieldsOpen ? '400px' : '0px',
+        overflow: 'hidden',
+        transition: 'max-height 0.3s ease',
+      }}>
+        <div style={{ paddingTop: 12 }}>
+          <AddressFields form={form} handleChange={handleChange} />
+        </div>
       </div>
     </div>
   )
