@@ -20,6 +20,9 @@
   --font-body: 'DM Sans', sans-serif;
   --shadow: 0 4px 24px rgba(0,0,0,0.4);
   --shadow-lg: 0 8px 48px rgba(0,0,0,0.6);
+  --r: 12px;
+  --r-lg: 20px;
+  --accent-pale: rgba(124, 106, 255, 0.08);
 }
 
 *, *::before, *::after {
