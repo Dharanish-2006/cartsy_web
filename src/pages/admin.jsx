@@ -1,4 +1,3 @@
-// src/pages/Admin.jsx
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -22,24 +21,28 @@ const STATUS_CONFIG = {
 
 const ALL_STATUSES = Object.keys(STATUS_CONFIG)
 
-// ── WebSocket hook ───────────────────────────────────────────────────────────
-function useAdminWS(onNewOrder) {
-  const wsRef       = useRef(null)
-  const retryRef    = useRef(null)
-  const retryCount  = useRef(0)
+export function useAdminWS(onNewOrder) {
+  const wsRef = useRef(null)
+  const retryRef = useRef(null)
+  const retryCount = useRef(0)
   const [connected, setConnected] = useState(false)
+  const isUnmounting = useRef(false)
 
   const connect = useCallback(() => {
     const WS_BASE = (import.meta.env.VITE_WS_URL || 'ws://127.0.0.1:8000')
       .replace(/\/$/, '')
+
     const token = localStorage.getItem('access_token')
-    const url   = `${WS_BASE}/ws/admin/notifications/?token=${token || ''}`
+    const url = `${WS_BASE}/ws/admin/notifications/?token=${token || ''}`
+
+    console.log("🔌 Connecting to:", url)
 
     try {
       const ws = new WebSocket(url)
       wsRef.current = ws
 
       ws.onopen = () => {
+        console.log("✅ WebSocket Connected")
         setConnected(true)
         retryCount.current = 0
         clearTimeout(retryRef.current)
@@ -48,33 +51,56 @@ function useAdminWS(onNewOrder) {
       ws.onmessage = (e) => {
         try {
           const data = JSON.parse(e.data)
-          if (data.type === 'new_order') onNewOrder(data)
-        } catch {}
+          if (data.type === 'new_order') {
+            onNewOrder(data)
+          }
+        } catch (err) {
+          console.error("Invalid WS message:", err)
+        }
       }
 
-      ws.onclose = () => {
+      ws.onerror = (err) => {
+        console.error("WebSocket error:", err)
+      }
+
+      ws.onclose = (e) => {
+        console.log("WebSocket Closed:", e.code, e.reason)
         setConnected(false)
-        // Exponential backoff: 2s, 4s, 8s … max 30s
+
+        if (isUnmounting.current) return
+
+        if (e.code === 1000) return
+
         const delay = Math.min(2000 * Math.pow(2, retryCount.current), 30000)
         retryCount.current += 1
-        retryRef.current = setTimeout(connect, delay)
+
+        retryRef.current = setTimeout(() => {
+          connect()
+        }, delay)
       }
 
-      ws.onerror = () => ws.close()
-    } catch {}
+    } catch (err) {
+      console.error(" WS connection failed:", err)
+    }
   }, [onNewOrder])
 
   useEffect(() => {
+    isUnmounting.current = false
     connect()
+
     return () => {
+      isUnmounting.current = true
       clearTimeout(retryRef.current)
-      wsRef.current?.close()
+
+      if (wsRef.current) {
+        wsRef.current.onclose = null // 🚨 prevent loop
+        wsRef.current.close(1000, "Component unmounted")
+      }
     }
   }, [connect])
 
   return connected
 }
-
 // ── Notification store (in-memory, reliable) ─────────────────────────────────
 function useNotifications() {
   const [notifs, setNotifs]       = useState([])
